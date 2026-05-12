@@ -54,19 +54,31 @@ export const PURE_MUSIC_LYRIC_DATA = {
 };
 
 
-const simularityCache: Record<string, number> = {};
+const MAX_CACHE_SIZE = 500;
+const simularityCache: Map<string, number> = new Map();
+
 function calcSimularity(a: string, b: string) {
 	if (typeof(a) === "undefined") a = "";
 	if (typeof(b) === "undefined") b = "";
-	const key = `${a}::${b}`;
-	if (simularityCache[key] !== undefined) {
-		return simularityCache[key];
+	
+	// Use shorter string as key for better cache hit rate
+	const key = a.length <= b.length ? `${a}::${b}` : `${b}::${a}`;
+	
+	const cached = simularityCache.get(key);
+	if (cached !== undefined) {
+		return cached;
 	}
+	
 	const m = a.length;
 	const n = b.length;
-	const d: number[][] = [];
+	
+	// Early exit for empty strings
+	if (m === 0) return n;
+	if (n === 0) return m;
+	
+	const d: number[][] = new Array(m + 1);
 	for (let i = 0; i <= m; i++) {
-		d[i] = [];
+		d[i] = new Array(n + 1);
 		d[i][0] = i;
 	}
 	for (let j = 0; j <= n; j++) {
@@ -81,7 +93,19 @@ function calcSimularity(a: string, b: string) {
 			}
 		}
 	}
-	return d[m][n];
+	
+	const result = d[m][n];
+	
+	// LRU-like cache eviction
+	if (simularityCache.size >= MAX_CACHE_SIZE) {
+		const firstKey = simularityCache.keys().next().value;
+		if (firstKey !== undefined) {
+			simularityCache.delete(firstKey);
+		}
+	}
+	simularityCache.set(key, result);
+	
+	return result;
 }
 
 

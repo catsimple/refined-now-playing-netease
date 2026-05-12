@@ -54,11 +54,11 @@ export const setSetting = (option, value) => {
 	localStorage.setItem(option, value);
 }
 export const chunk = (input, size) => {
-	return input.reduce((arr, item, idx) => {
-		return idx % size === 0
-			? [...arr, [item]]
-			: [...arr.slice(0, -1), [...arr.slice(-1)[0], item]];
-	}, []);
+	const result = [];
+	for (let i = 0; i < input.length; i += size) {
+		result.push(input.slice(i, i + size));
+	}
+	return result;
 };
 export const copyTextToClipboard = (text) => {
 	const textarea = document.createElement('textarea');

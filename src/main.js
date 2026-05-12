@@ -710,6 +710,7 @@ const toggleFullScreen = (force = null) => {
 	}
 }
 
+let fullScreenClockInterval = null;
 const addFullScreenButton = () => {
 	const fullScreenButton = document.createElement('div');
 	fullScreenButton.classList.add('rnp-full-screen-button');
@@ -723,22 +724,22 @@ const addFullScreenButton = () => {
 		var currentTime = new Date();
 		var hours = currentTime.getHours();
 		var minutes = currentTime.getMinutes();
-	  
-		// 格式化小时和分钟，确保是两位数
 		hours = ('0' + hours).slice(-2);
 		minutes = ('0' + minutes).slice(-2);
 		fullScreenClock.textContent = hours + ':' + minutes;
 	  }
 	updateClock();
-	setInterval(updateClock, 1000);
+	if (fullScreenClockInterval) clearInterval(fullScreenClockInterval);
+	fullScreenClockInterval = setInterval(updateClock, 1000);
 	document.body.appendChild(fullScreenClock);
 };
 
-new MutationObserver(() => {
+const fullScreenExitObserver = new MutationObserver(() => {
 	if (!document.body.classList.contains('mq-playing') && document.body.classList.contains('rnp-full-screen')) {
 		toggleFullScreen(false);
 	}
-}).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+});
+fullScreenExitObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
 // intercept src setter of HTMLImageElement
 const _src = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
@@ -771,7 +772,7 @@ plugin.onLoad(async (p) => {
 		document.body.classList.add('no-material-you-theme');
 	}
 
-	new MutationObserver(async () => { // Now playing page
+	const nowPlayingPageObserver = new MutationObserver(async () => { // Now playing page
 		if (document.querySelector('.g-single:not(.patched)')) {
 			document.querySelector('.g-single').classList.add('patched');
 			waitForElement('.n-single .cdimg img', (dom) => {
@@ -892,12 +893,14 @@ plugin.onLoad(async (p) => {
 
 			whatsNew();
 		}
-	}).observe(document.body, { childList: true });
+	});
+	nowPlayingPageObserver.observe(document.body, { childList: true });
 
-	new MutationObserver(() => {
+	const titleRecalcObserver = new MutationObserver(() => {
 		recalculateTitleSize();
 		calcTitleScroll();
-	}).observe(document.body, { childList: true , subtree: true, attributes: true, characterData: true, attributeFilter: ['src']});
+	});
+	titleRecalcObserver.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true, attributeFilter: ['src']});
 
 	// Add progressbar hover preview
 	waitForElement('#main-player .prg', (dom) => {
@@ -918,7 +921,7 @@ plugin.onLoad(async (p) => {
 	const lightThemeFixStyle = document.createElement('link');
 	lightThemeFixStyle.rel = 'stylesheet';
 	document.head.appendChild(lightThemeFixStyle);
-	new MutationObserver(() => {
+	const lightThemeFixObserver = new MutationObserver(() => {
 		if (document.body.classList.contains('mq-playing')) {
 			if (lightThemeFixStyle.href !== 'orpheus://orpheus/style/res/less/default/css/skin.ls.css') {
 				lightThemeFixStyle.href = 'orpheus://orpheus/style/res/less/default/css/skin.ls.css';
@@ -928,11 +931,12 @@ plugin.onLoad(async (p) => {
 				lightThemeFixStyle.href = '';
 			}
 		}
-	}).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+	});
+	lightThemeFixObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
 
 	let previousHasClass = document.body.classList.contains('mq-playing');
-	new MutationObserver(() => {
+	const playingStateObserver = new MutationObserver(() => {
 		const hasClass = document.body.classList.contains('mq-playing');
 		if (hasClass !== previousHasClass) {
 			previousHasClass = hasClass;
@@ -945,7 +949,8 @@ plugin.onLoad(async (p) => {
 				}
 			}
 		}
-	}).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+	});
+	playingStateObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
 	
 	// 私人 FM
@@ -983,7 +988,7 @@ plugin.onLoad(async (p) => {
 			addSettingsMenu(true);
 		}
 	};
-	let FMObserver = new MutationObserver(patchFM);
+	const FMObserver = new MutationObserver(patchFM);
 	window.addEventListener('hashchange', async () => {
 		if (!window.location.hash.startsWith('#/m/fm/')) {
 			FMObserver.disconnect();
@@ -1040,16 +1045,18 @@ plugin.onLoad(async (p) => {
 			document.body.classList.add('rnp-idle');
 		}, Math.max((debounceTime ?? 0) + 325 - new Date().getTime(), 0));
 	}
-	resetIdleTimer();
-	document.addEventListener('mousemove', resetIdle);
-	document.addEventListener('mouseout', (e) => {
+	const onMouseMove = () => resetIdle();
+	const onMouseOut = (e) => {
 		if (e.relatedTarget === null) {
 			setIdle();
 		}
-	});
+	};
+	resetIdleTimer();
+	document.addEventListener('mousemove', onMouseMove);
+	document.addEventListener('mouseout', onMouseOut);
 
 	// Listen for now playing open
-	new MutationObserver((mutations) => {
+	const nowPlayingOpenObserver = new MutationObserver((mutations) => {
 		mutations.forEach((mutation) => {
 			if (mutation.addedNodes.length > 0) {
 				mutation.addedNodes.forEach((node) => {
@@ -1060,14 +1067,25 @@ plugin.onLoad(async (p) => {
 				});
 			}
 		});
-	}).observe(document.body, { childList: true });
-	/*new MutationObserver(() => {
-		if (!document.body.classList.contains('mq-playing') && !document.querySelector('.g-single')?.classList.contains('z-show')) {
-			if (document.body.classList.contains('mq-playing-init')) {
-				document.body.classList.remove('mq-playing-init');
-			}
+	});
+	nowPlayingOpenObserver.observe(document.body, { childList: true });
+	
+	// Cleanup function for plugin unload
+	window._rnpCleanup = () => {
+		if (fullScreenClockInterval) {
+			clearInterval(fullScreenClockInterval);
+			fullScreenClockInterval = null;
 		}
-	}).observe(document.body, { attributes: true, attributeFilter: ['class'] });*/
+		fullScreenExitObserver.disconnect();
+		nowPlayingPageObserver.disconnect();
+		titleRecalcObserver.disconnect();
+		lightThemeFixObserver.disconnect();
+		playingStateObserver.disconnect();
+		FMObserver.disconnect();
+		nowPlayingOpenObserver.disconnect();
+		document.removeEventListener('mousemove', onMouseMove);
+		document.removeEventListener('mouseout', onMouseOut);
+	};
 });
 
 plugin.onConfig((tools) => {

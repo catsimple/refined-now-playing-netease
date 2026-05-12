@@ -167,22 +167,29 @@ function FluidBackground(props) {
 		}
 	}, []);
 
+	// Set blur filter once on mount
 	useEffect(() => {
-		canvas1.current.getContext('2d').filter = 'blur(5px)';
-		canvas2.current.getContext('2d').filter = 'blur(5px)';
-		canvas3.current.getContext('2d').filter = 'blur(5px)';
-		canvas4.current.getContext('2d').filter = 'blur(5px)';
+		const filter = 'blur(5px)';
+		canvas1.current.getContext('2d').filter = filter;
+		canvas2.current.getContext('2d').filter = filter;
+		canvas3.current.getContext('2d').filter = filter;
+		canvas4.current.getContext('2d').filter = filter;
 	}, []);
 
 	useEffect(() => {
+		if (!props.url) return;
 		const image = new Image();
 		image.crossOrigin = 'Anonymous';
 		image.onload = () => {
 			const { width, height } = image;
-			canvas1.current.getContext('2d').drawImage(image, 0, 0, width / 2, height / 2, 0, 0, 100, 100);
-			canvas2.current.getContext('2d').drawImage(image, width / 2, 0, width / 2, height / 2, 0, 0, 100, 100);
-			canvas3.current.getContext('2d').drawImage(image, 0, height / 2, width / 2, height / 2, 0, 0, 100, 100);
-			canvas4.current.getContext('2d').drawImage(image, width / 2, height / 2, width / 2, height / 2, 0, 0, 100, 100);
+			const ctx1 = canvas1.current.getContext('2d');
+			const ctx2 = canvas2.current.getContext('2d');
+			const ctx3 = canvas3.current.getContext('2d');
+			const ctx4 = canvas4.current.getContext('2d');
+			ctx1.drawImage(image, 0, 0, width / 2, height / 2, 0, 0, 100, 100);
+			ctx2.drawImage(image, width / 2, 0, width / 2, height / 2, 0, 0, 100, 100);
+			ctx3.drawImage(image, 0, height / 2, width / 2, height / 2, 0, 0, 100, 100);
+			ctx4.drawImage(image, width / 2, height / 2, width / 2, height / 2, 0, 0, 100, 100);
 		};
 		image.src = props.url;
 		feTurbulence.current.setAttribute('seed', parseInt(Math.random() * 1000));
@@ -226,7 +233,11 @@ function FluidBackground(props) {
 
 	const setDisplacementScale = React.useCallback((value) => {
 		if (!feDisplacementMap.current) return;
-		feDisplacementMap.current.setAttribute('scale', value);
+		const rounded = Math.round(value);
+		const current = parseInt(feDisplacementMap.current.getAttribute('scale')) || 0;
+		if (Math.abs(rounded - current) > 2) {
+			feDisplacementMap.current.setAttribute('scale', rounded);
+		}
 	}, []);
 
 	// Audio-responsive background (For LibVolumeLevelProvider)
@@ -277,23 +288,24 @@ function FluidBackground(props) {
 
 
 
-		const request = useRef(0);
+		const intervalId = useRef(0);
 		useEffect(() => {
-			const animate = () => {
-				request.current = requestAnimationFrame(animate);
+			// Use low-frequency setInterval instead of RAF for audio analysis
+			// This avoids blocking the main thread's render loop
+			intervalId.current = setInterval(() => {
 				if (!playState.current) return;
-				//processor.current.analyser.getFloatFrequencyData(processor.current.dataArray);
-				//const max = Math.max(...processor.current.dataArray);
+				
 				loadedPlugins.LibFrontendPlay.currentAudioAnalyser.getFloatFrequencyData(processor.current.dataArray);
-				const max = Math.max(...processor.current.dataArray);
-				//const percentage = (max - processor.current.analyser.minDecibels) / (processor.current.analyser.maxDecibels - processor.current.analyser.minDecibels);
+				let max = -Infinity;
+				const dataArray = processor.current.dataArray;
+				for (let i = 0; i < dataArray.length; i++) {
+					if (dataArray[i] > max) max = dataArray[i];
+				}
 				const percentage = Math.pow(1.3, max / 20) * 2 - 1;
-				//console.log(max, percentage, processor.current.audio.volume);
 				setDisplacementScale(Math.min(600, Math.max(200, 800 - percentage * 800)));
-			};
-			request.current = requestAnimationFrame(animate);
+			}, 100); // ~10fps for audio response is enough
 			return () => {
-				cancelAnimationFrame(request.current);
+				clearInterval(intervalId.current);
 			}
 		}, []);
 	}

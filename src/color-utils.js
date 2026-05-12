@@ -112,54 +112,92 @@ export const calcColorDifference = (color1, color2) => {
 	return Math.sqrt(deltaL * deltaL + deltaA * deltaA + deltaB * deltaB);
 }
 
+// Cache for gradient calculations
+const gradientCache = new Map();
+const MAX_GRADIENT_CACHE = 20;
+
 export const getGradientFromPalette = (palette) => {
-	palette = palette.sort((a, b) => {
+	// Create a simple cache key from palette
+	const cacheKey = palette.slice(0, 10).map(c => c.join(',')).join('|');
+	if (gradientCache.has(cacheKey)) {
+		return gradientCache.get(cacheKey);
+	}
+	
+	// Limit palette size early to reduce computation
+	let filteredPalette = palette.slice(0, 20);
+	
+	filteredPalette = filteredPalette.slice().sort((a, b) => {
 		return calcLuminance(a) - calcLuminance(b);
 	});
-	palette = palette.slice(palette.length / 2 - 4, palette.length / 2 + 4);
-	palette = palette.sort((a, b) => {
+	filteredPalette = filteredPalette.slice(filteredPalette.length / 2 - 4, filteredPalette.length / 2 + 4);
+	
+	// If we have less than 6 colors, use what we have
+	if (filteredPalette.length <= 6) {
+		const colors = filteredPalette;
+		let ans = 'linear-gradient(-45deg,';
+		for (let i = 0; i < colors.length; i++) {
+			ans += `rgb(${colors[i][0]}, ${colors[i][1]}, ${colors[i][2]})`;
+			if (i !== colors.length - 1) {
+				ans += ',';
+			}
+		}
+		ans += ')';
+		
+		if (gradientCache.size >= MAX_GRADIENT_CACHE) {
+			const firstKey = gradientCache.keys().next().value;
+			if (firstKey) gradientCache.delete(firstKey);
+		}
+		gradientCache.set(cacheKey, ans);
+		return ans;
+	}
+	
+	filteredPalette = filteredPalette.slice().sort((a, b) => {
 		return rgb2Hsl(b)[1] - rgb2Hsl(a)[1];
 	});
-	palette = palette.slice(0, 6);
+	filteredPalette = filteredPalette.slice(0, 6);
 
-	let differences = new Array(6);
-	for(let i = 0; i < differences.length; i++){
+	const differences = new Array(6);
+	for(let i = 0; i < 6; i++){
 		differences[i] = new Array(6).fill(0);
 	}
-	for (let i = 0; i < palette.length; i++) {
-		for (let j = i + 1; j < palette.length; j++) {
-			differences[i][j] = calcColorDifference(palette[i], palette[j]);
+	for (let i = 0; i < filteredPalette.length; i++) {
+		for (let j = i + 1; j < filteredPalette.length; j++) {
+			differences[i][j] = calcColorDifference(filteredPalette[i], filteredPalette[j]);
 			differences[j][i] = differences[i][j];
 		}
 	}
 
-	let used = new Array(6).fill(false);
-	let min = 10000000, ansSeq = [];
+	const used = new Array(6).fill(false);
+	let min = 10000000;
+	let ansSeq = [];
+	
+	// Add pruning to DFS to reduce search space
 	const dfs = (depth, seq = [], currentMax = -1) => {
+		if (currentMax >= min) return; // Prune branches that can't improve
+		
 		if (depth === 6) {
 			if (currentMax < min) {
 				min = currentMax;
-				ansSeq = seq;
+				ansSeq = [...seq];
 			}
 			return;
 		}
 		for (let i = 0; i < 6; i++) {
 			if (used[i]) continue;
 			used[i] = true;
-			dfs(depth + 1, seq.concat(i), Math.max(currentMax, differences[seq[depth - 1]][i]));
+			const newMax = seq.length > 0 ? Math.max(currentMax, differences[seq[depth - 1]][i]) : 0;
+			dfs(depth + 1, [...seq, i], newMax);
 			used[i] = false;
 		}
-	}
+	};
+	
 	for (let i = 0; i < 6; i++) {
 		used[i] = true;
 		dfs(1, [i]);
 		used[i] = false;
 	}
 
-	let colors = [];
-	for (let i of ansSeq) {
-		colors.push(palette[ansSeq[i]]);
-	}
+	const colors = ansSeq.map(i => filteredPalette[i]);
 	let ans = 'linear-gradient(-45deg,';
 	for (let i = 0; i < colors.length; i++) {
 		ans += `rgb(${colors[i][0]}, ${colors[i][1]}, ${colors[i][2]})`;
@@ -168,6 +206,14 @@ export const getGradientFromPalette = (palette) => {
 		}
 	}
 	ans += ')';
+	
+	// Cache the result
+	if (gradientCache.size >= MAX_GRADIENT_CACHE) {
+		const firstKey = gradientCache.keys().next().value;
+		if (firstKey) gradientCache.delete(firstKey);
+	}
+	gradientCache.set(cacheKey, ans);
+	
 	return ans;
 }
 export const argb2Rgb = (x) => {

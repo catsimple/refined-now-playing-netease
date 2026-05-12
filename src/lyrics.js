@@ -252,169 +252,181 @@ export function Lyrics(props) {
 	}, []);
 
 	const previousFocusedLineRef = useRef(0);
-	useEffect(() => { // Recalculate vertical positions and transforms of each line
-		if (lyrics == null || lyrics == undefined) return;
+	const lastTransformsKey = useRef('');
+	const rafId = useRef(0);
 
-		const space = fontSize * 1.2;
-		const delayByOffset = (offset) => {
-			//console.log(currentLine, previousFocusedLineRef.current);
-			if (currentLineForScrolling == previousFocusedLineRef.current || scrollingMode) {
-				return 0;
+	// Use requestAnimationFrame to batch transform calculations
+	// This prevents layout thrashing during rapid scroll events
+	const scheduleTransformUpdate = useCallback(() => {
+		cancelAnimationFrame(rafId.current);
+		rafId.current = requestAnimationFrame(() => {
+			if (lyrics == null || lyrics == undefined) return;
+
+			const space = fontSize * 1.2;
+			
+			// Cache key: skip if nothing meaningful changed
+			const cacheKey = `${currentLineForScrolling}-${scrollingFocusLine}-${scrollingMode}-${containerHeight}-${fontSize}-${lyrics.length}`;
+			if (cacheKey === lastTransformsKey.current) return;
+			lastTransformsKey.current = cacheKey;
+
+			const delayByOffset = (offset) => {
+				if (currentLineForScrolling == previousFocusedLineRef.current || scrollingMode) {
+					return 0;
+				}
+				if (!lyricStagger) return 0;
+				let sign = currentLineForScrolling - previousFocusedLineRef.current > 0 ? 1 : -1;
+				offset = Math.max(-4, Math.min(4, offset)) * sign + 4;
+				return offset * 50;
+			};
+			const scaleByOffset = (offset) => {
+				if (!lyricZoom) return 1;
+				if (customScaleFunc) {
+					try { return customScaleFunc(offset); }
+					catch (e) { console.error('Error in custom scale function', e); }
+				}
+				offset = Math.abs(offset);
+				offset = Math.max(1 - offset * 0.2, 0);
+				return offset * offset * offset * 0.3 + 0.7;
+			};
+			const blurByOffset = (offset) => {
+				if (!lyricBlur || scrollingMode) return 0;
+				if (customBlurFunc) {
+					try { return customBlurFunc(offset); }
+					catch (e) { console.error('Error in custom blur function', e); }
+				}
+				offset = Math.abs(offset);
+				if (offset == 0) return 0;
+				return Math.min(0.5 + 1 * offset, 4.5);
+			};
+			const opacityByOffset = (offset) => {
+				if (!lyricFade || scrollingMode) return 1;
+				if (customOpacityFunc) {
+					try { return customOpacityFunc(offset); }
+					catch (e) { console.error('Error in custom opacity function', e); }
+				}
+				offset = Math.abs(offset);
+				if (offset <= 1) return 1;
+				return Math.max(1 - 0.4 * (offset - 1), 0);
+			};
+			const setRotateTransform = (line, yOffset, height) => {
+				if (!lyricRotate) return;
+				const origin = [-120 + (RotateCurvature - 25), -(yOffset + height / 2)];
+				const len = Math.sqrt(origin[0] * origin[0] + origin[1] * origin[1]);
+				line.rotate = Math.min(yOffset / window.innerHeight * -RotateCurvature, 90);
+				const deg = line.rotate + Math.atan2(origin[1], origin[0]) * 180 / Math.PI;
+				line.extraTop = Math.sin(deg * Math.PI / 180) * len - origin[1];
+				line.left = Math.cos(deg * Math.PI / 180) * len - origin[0];
+				const opacity = 1 - (1 * Math.abs(yOffset * 2 / window.innerHeight) ** 1.15 * 1.2);
+				line.opacity = Math.max(opacity, 0);
+				if (opacity <= -1.5) line.outOfRangeHidden = true;
+				else if (line.outOfRangeHidden) delete line.outOfRangeHidden;
+			};
+
+			const transforms = [];
+			for (let i = 0; i <= lyrics.length; i++) transforms.push({ top: 0, scale: 1, delay: 0 });
+			
+			let current = Math.min(Math.max(currentLineForScrolling ?? 0, 0), lyrics.length - 1);
+			if (current == -1) current = 0;
+			if (scrollingMode) {
+				current = Math.min(Math.max(scrollingFocusLine ?? 0, 0), lyrics.length - 1);
 			}
-			if (!lyricStagger) {
-				return 0;
+
+			let visualCurrent = current;
+			if (lyrics[current]?.isBG && current > 0 && !scrollingMode) {
+				visualCurrent = current - 1;
+				transforms[visualCurrent].highlightForce = true;
 			}
-			let sign = currentLineForScrolling - previousFocusedLineRef.current > 0 ? 1 : -1;
-			offset = Math.max(-4, Math.min(4, offset)) * sign + 4;
-			return offset * 50;
-		};
-		const scaleByOffset = (offset) => {
-			if (!lyricZoom) return 1;
-			if (customScaleFunc) {
-				try {
-					return customScaleFunc(offset);
-				} catch (e) {
-					console.error('Error in custom scale function', e);
+
+			// Only recalculate heights when NOT scrolling (manual browse mode)
+			if (!scrollingMode) recalcHeightOfItems();
+
+			transforms[visualCurrent].top = 
+				containerRef.current.clientHeight * (currentLyricAlignmentPercentage * 0.01) - 
+				heightOfItems.current[visualCurrent] / 2;
+			transforms[visualCurrent].scale = 1;
+			transforms[visualCurrent].delay = delayByOffset(0);
+			transforms[visualCurrent].blur = blurByOffset(0);
+			transforms[visualCurrent].opacity = 1;
+
+			const currentLineHeight = heightOfItems.current[visualCurrent];
+			if (lyrics[visualCurrent]?.isInterlude && !scrollingMode) {
+				heightOfItems.current[visualCurrent] = currentLineHeight + 50;
+			}
+
+			for (let i = visualCurrent - 1; i >= 0; i--) {
+				let effectiveOffset = visualCurrent - i;
+				transforms[i].scale = scaleByOffset(effectiveOffset);
+				transforms[i].blur = blurByOffset(-effectiveOffset);
+				transforms[i].opacity = lyrics[i].isBG ? 0 : opacityByOffset(-effectiveOffset);
+				let scaledHeight = lyrics[i].isBG ? 0 : heightOfItems.current[i] * transforms[i].scale;
+				const currentSpace = lyrics[i].isBG ? 0 : space;
+				transforms[i].top = transforms[i + 1].top - scaledHeight - currentSpace;
+				transforms[i].delay = delayByOffset(i - visualCurrent);
+				setRotateTransform(transforms[i], transforms[visualCurrent].top - transforms[i].top, heightOfItems.current[i] * transforms[i].scale);
+			}
+			for (let i = visualCurrent + 1; i < lyrics.length; i++) {
+				let effectiveOffset = i - visualCurrent;
+				if (lyrics[i].isBG) {
+					const prevLineHeight = heightOfItems.current[i - 1] * transforms[i - 1].scale;
+					const prevLineTop = transforms[i - 1].top;
+					const bgLineEstimatedHeight = fontSize * 0.6;
+					const bgSpace = space * 0.2;
+					transforms[i].top = prevLineTop + prevLineHeight + bgSpace + bgLineEstimatedHeight / 2;
+				} else {
+					const previousScaledHeight = heightOfItems.current[i - 1] * transforms[i - 1].scale;
+					if (lyrics[i-1].isBG) {
+						let prevNonBGIndex = i - 1;
+						while (prevNonBGIndex >= 0 && lyrics[prevNonBGIndex].isBG) prevNonBGIndex--;
+						if (prevNonBGIndex >= 0) {
+							const prevNonBGHeight = heightOfItems.current[prevNonBGIndex] * transforms[prevNonBGIndex].scale;
+							transforms[i].top = transforms[prevNonBGIndex].top + prevNonBGHeight + space;
+						} else {
+							transforms[i].top = transforms[i-1].top + space;
+						}
+					} else {
+						transforms[i].top = transforms[i - 1].top + previousScaledHeight + space;
+					}
+				}
+				transforms[i].scale = scaleByOffset(effectiveOffset);
+				transforms[i].blur = blurByOffset(effectiveOffset);
+				transforms[i].opacity = opacityByOffset(effectiveOffset);
+				transforms[i].delay = delayByOffset(i - visualCurrent);
+				setRotateTransform(transforms[i], transforms[visualCurrent].top - transforms[i].top, heightOfItems.current[i] * transforms[i].scale);
+			}
+			transforms[lyrics.length].scale = scaleByOffset(lyrics.length - 1 - visualCurrent);
+			transforms[lyrics.length].blur = blurByOffset(lyrics.length - 1 - visualCurrent);
+			transforms[lyrics.length].opacity = opacityByOffset(lyrics.length - 1 - visualCurrent);
+			if (lyrics.length > 0) {
+				const previousScaledHeight = heightOfItems.current[lyrics.length - 1] * transforms[lyrics.length - 1].scale;
+				transforms[lyrics.length].top = transforms[lyrics.length - 1].top + previousScaledHeight + Math.min(space * 1.5, 90);
+			} else {
+				transforms[lyrics.length].top = containerHeight / 2 - heightOfItems.current[lyrics.length] / 2;
+				transforms[lyrics.length].blur = blurByOffset(0);
+				transforms[lyrics.length].scale = scaleByOffset(0);
+				transforms[lyrics.length].opacity = opacityByOffset(0);
+			}
+			transforms[lyrics.length].delay = delayByOffset(lyrics.length - visualCurrent);
+			setRotateTransform(transforms[lyrics.length], transforms[visualCurrent].top - transforms[lyrics.length].top, heightOfItems.current[lyrics.length] * transforms[lyrics.length].scale);
+			heightOfItems.current[visualCurrent] = currentLineHeight;
+			if (!shouldTransit.current && !scrollingMode) {
+				for (let i = 0; i <= lyrics.length; i++) {
+					transforms[i].delay = 0;
+					transforms[i].duration = 0;
 				}
 			}
-			offset = Math.abs(offset);
-			offset =  Math.max(1 - offset * 0.2, 0);
-			return offset * offset * offset /* offset*/ * 0.3 + 0.7;
-		};
-		const blurByOffset = (offset) => {
-			if (!lyricBlur || scrollingMode) return 0;
-			if (customBlurFunc) {
-				try {
-					return customBlurFunc(offset);
-				} catch (e) {
-					console.error('Error in custom blur function', e);
-				}
-			}				
-			offset = Math.abs(offset);
-			if (offset == 0) return 0;
-			return Math.min(0.5 + 1 * offset, 4.5);
-		};
-		const opacityByOffset = (offset) => {
-			if (!lyricFade || scrollingMode) return 1;
-			if (customOpacityFunc) {
-				try {
-					return customOpacityFunc(offset);
-				} catch (e) {
-					console.error('Error in custom opacity function', e);
-				}
-			}
-			offset = Math.abs(offset);
-			if (offset <= 1) return 1;
-			return Math.max(1 - 0.4 * (offset - 1), 0);
-		};
-		const setRotateTransform = (line, yOffset, height) => {
-			if (!lyricRotate) return;
-			const origin = [-120 + (RotateCurvature - 25), -(yOffset + height / 2)];
-			const len = Math.sqrt(origin[0] * origin[0] + origin[1] * origin[1]);
-			line.rotate = Math.min(yOffset / window.innerHeight * -RotateCurvature, 90);
-
-			const deg = line.rotate + Math.atan2(origin[1], origin[0]) * 180 / Math.PI;
-			line.extraTop = Math.sin(deg * Math.PI / 180) * len - origin[1];
-			line.left = Math.cos(deg * Math.PI / 180) * len - origin[0];
-
-			const opacity = 1 - (1 * Math.abs(yOffset * 2 / window.innerHeight) ** 1.15 * 1.2);
-			line.opacity = Math.max(opacity, 0);
-			if (opacity <= -1.5) line.outOfRangeHidden = true;
-			else if (line.outOfRangeHidden) delete line.outOfRangeHidden;
-		};
-
-
-		//console.log(currentLine, previousFocusedLineRef.current, currentLine - previousFocusedLineRef.current > 0 ? 1 : -1);
-
-		const transforms = [];
-		for (let i = 0; i <= lyrics.length; i++) transforms.push({ top: 0, scale: 1, delay: 0 });
-		//console.log('containerHeight', containerHeight);
-		let current = Math.min(Math.max(currentLineForScrolling ?? 0, 0), lyrics.length - 1);
-		if (current == -1) current = 0;
-		if (scrollingMode) {
-			current = Math.min(Math.max(scrollingFocusLine ?? 0, 0), lyrics.length - 1);
-		}
-
-		if (!scrollingMode) recalcHeightOfItems();
-		//console.log(currentLine, current);
-		//transforms[current].top = containerHeight / 2 - heightOfItems.current[current] / 2;
-		transforms[current].top = 
-			containerRef.current.clientHeight * (currentLyricAlignmentPercentage * 0.01) - 
-			heightOfItems.current[current] / 2;
-		transforms[current].scale = 1;
-		transforms[current].delay = delayByOffset(0);
-		transforms[current].blur = blurByOffset(0);
-		const currentLineHeight = heightOfItems.current[current];
-		if (lyrics[current]?.isInterlude && !scrollingMode) {
-			// temporary heighten the interlude line
-			heightOfItems.current[current] = currentLineHeight + 50;
-		}
-		// all lines before current
-		for (let i = current - 1; i >= 0; i--) {
-			transforms[i].scale = scaleByOffset(current - i);
-			transforms[i].blur = blurByOffset(i - current);
-			transforms[i].opacity = opacityByOffset(i - current);
-			let scaledHeight = heightOfItems.current[i] * transforms[i].scale;
-			transforms[i].top = transforms[i + 1].top - scaledHeight - space;
-			transforms[i].delay = delayByOffset(i - current);
-			setRotateTransform(transforms[i], transforms[current].top - transforms[i].top, heightOfItems.current[i] * transforms[i].scale);
-		}
-		// all lines after current
-		for (let i = current + 1; i < lyrics.length; i++) {
-			transforms[i].scale = scaleByOffset(i - current);
-			transforms[i].blur = blurByOffset(i - current);
-			transforms[i].opacity = opacityByOffset(i - current);
-			const previousScaledHeight = heightOfItems.current[i - 1] * transforms[i - 1].scale;
-			transforms[i].top = transforms[i - 1].top + previousScaledHeight + space;
-			transforms[i].delay = delayByOffset(i - current);
-			setRotateTransform(transforms[i], transforms[current].top - transforms[i].top, heightOfItems.current[i] * transforms[i].scale);
-		}
-		// contributors line
-		transforms[lyrics.length].scale = scaleByOffset(lyrics.length - 1 - current);
-		transforms[lyrics.length].blur = blurByOffset(lyrics.length - 1 - current);
-		transforms[lyrics.length].opacity = opacityByOffset(lyrics.length - 1 - current);
-		if (lyrics.length > 0) {
-			const previousScaledHeight = heightOfItems.current[lyrics.length - 1] * transforms[lyrics.length - 1].scale;
-			transforms[lyrics.length].top = transforms[lyrics.length - 1].top + previousScaledHeight + Math.min(space * 1.5, 90);
-		} else {
-			transforms[lyrics.length].top = containerHeight / 2 - heightOfItems.current[lyrics.length] / 2;
-			transforms[lyrics.length].blur = blurByOffset(0);
-			transforms[lyrics.length].scale = scaleByOffset(0);
-			transforms[lyrics.length].opacity = opacityByOffset(0);
-		}
-		transforms[lyrics.length].delay = delayByOffset(lyrics.length - current);
-		setRotateTransform(transforms[lyrics.length], transforms[current].top - transforms[lyrics.length].top, heightOfItems.current[lyrics.length] * transforms[lyrics.length].scale);
-		// set the height of interlude line back to normal
-		heightOfItems.current[current] = currentLineHeight;
-		// reset delay to 0 if necessary
-		// for no transition when resizing, etc.
-		if (!shouldTransit.current && !scrollingMode) {
-			for (let i = 0; i <= lyrics.length; i++) {
-				transforms[i].delay = 0;
-				transforms[i].duration = 0;
-			}
-		}
-		// reduce duration when scrolling
-		/*if (scrollingMode) {
-			for (let i = 0; i <= lyrics.length; i++) {
-				transforms[i].duration = 200;
-			}
-		}*/
-	
-		setLineTransforms(transforms);
-		//console.log('transforms', transforms);
-		previousFocusedLineRef.current = currentLineForScrolling;
-	},[
-		currentLineForScrolling,
-		containerHeight, containerWidth,
-		fontSize, lyricFade, lyricZoom, lyricBlur, lyricRotate, RotateCurvature,
-		showTranslation, showRomaji, useKaraokeLyrics,
-		scrollingMode, scrollingFocusLine,
-		currentLyricAlignmentPercentage,
-		lyricStagger,
-		recalcCounter,
-		lyrics
+			setLineTransforms(transforms);
+			previousFocusedLineRef.current = currentLineForScrolling;
+		});
+	}, [
+		currentLineForScrolling, scrollingFocusLine, scrollingMode,
+		containerHeight, fontSize, lyrics,
+		lyricFade, lyricZoom, lyricBlur, lyricRotate, RotateCurvature,
+		currentLyricAlignmentPercentage, lyricStagger
 	]);
+
+	useEffect(() => {
+		scheduleTransformUpdate();
+	}, [scheduleTransformUpdate]);
 
 
 	const onPlayStateChange = (id, state) => {
@@ -429,6 +441,7 @@ export function Lyrics(props) {
 		}
 		setSongId(id);
 	};
+	const lastUpdateLine = useRef(-1);
 	const onPlayProgress = (id, progress) => {
 		if (!isCurrentModeSession()) {
 			return;
@@ -436,12 +449,11 @@ export function Lyrics(props) {
 		if (loadedPlugins['LibFrontendPlay'] && loadedPlugins['LibFrontendPlay'].enabled && loadedPlugins['LibFrontendPlay']?.currentAudioPlayer) {
 			progress = loadedPlugins['LibFrontendPlay'].currentAudioPlayer.currentTime;
 		}
-		//console.log("new progress", id, progress);
-		//setSongId(id);
 		const lastTime = currentTime.current + _globalOffset.current;
 		currentTime.current = ((progress * 1000) || 0);
 		const currentTimeWithOffset = currentTime.current + _globalOffset.current;
 		if (!_lyrics.current) return;
+		
 		let startIndex = 0;
 		if (currentTimeWithOffset - lastTime > 0 && currentTimeWithOffset - lastTime < 50) {
 			startIndex = Math.max(0, currentLine - 1);
@@ -451,38 +463,43 @@ export function Lyrics(props) {
 		}
 	
 		let cur = 0;
-		for (let i = startIndex; i < _lyrics.current.length; i++) {
-			if (_lyrics.current[i].time <= currentTimeWithOffset) {
+		const lyricsData = _lyrics.current;
+		for (let i = startIndex; i < lyricsData.length; i++) {
+			if (lyricsData[i].time <= currentTimeWithOffset) {
 				cur = i;
 			} else {
 				break;
 			}
 		}
 		if (
-			cur == _lyrics.current.length - 1 &&
-			_lyrics.current[cur].duration &&
-			currentTimeWithOffset > _lyrics.current[cur].time + _lyrics.current[cur].duration + 500
+			cur == lyricsData.length - 1 &&
+			lyricsData[cur].duration &&
+			currentTimeWithOffset > lyricsData[cur].time + lyricsData[cur].duration + 500
 		) {
-			cur = _lyrics.current.length;
+			cur = lyricsData.length;
 		}
 	
 		let curForScrolling = Math.max(0, cur - 1);
 		const scrollingDelay = lyricStagger ? 200 : 0;
-		for (let i = startIndex; i < _lyrics.current.length; i++) {
-			if (_lyrics.current[i].time <= currentTimeWithOffset + scrollingDelay) {
+		for (let i = startIndex; i < lyricsData.length; i++) {
+			if (lyricsData[i].time <= currentTimeWithOffset + scrollingDelay) {
 				curForScrolling = i;
 			} else {
 				break;
 			}
 		}
 		
-		shouldTransit.current = true;
-		if (!_scrollingMode.current) {
-			setScrollingFocusLine(cur);
-			_scrollingFocusLine.current = cur;
+		// Only update state if line actually changed to reduce re-renders
+		if (cur !== lastUpdateLine.current) {
+			lastUpdateLine.current = cur;
+			shouldTransit.current = true;
+			if (!_scrollingMode.current) {
+				setScrollingFocusLine(cur);
+				_scrollingFocusLine.current = cur;
+			}
+			setCurrentLine(cur);
+			setCurrentLineForScrolling(curForScrolling);
 		}
-		setCurrentLine(cur);
-		setCurrentLineForScrolling(curForScrolling);
 	};
 	useEffect(() => {
 		onPlayProgress(songId, currentTime.current / 1000);
@@ -552,15 +569,27 @@ export function Lyrics(props) {
 		}
 	}, []);
 
+	const isScrollingRef = useRef(false);
+
 	const scrollingFocusOnLine = useCallback((line) => {
 		if (line == null) return;
-		shouldTransit.current = true;
+		// During manual scrolling, disable transitions to prevent jank
+		// when hundreds of lines animate simultaneously
+		if (isScrollingRef.current) {
+			shouldTransit.current = false;
+		} else {
+			shouldTransit.current = true;
+		}
 		setScrollingMode(true);
 		setScrollingFocusLine(line);
 		_scrollingFocusLine.current = line;
 	}, []);
 
 	const onWheel = (e) => {
+		// Disable transitions during rapid scroll
+		isScrollingRef.current = true;
+		shouldTransit.current = false;
+
 		if (e.deltaY > 0) {
 			for (let target = _scrollingFocusLine.current + 1; target < _lyrics.current.length; target++) {
 				if (!_lyrics.current[target].isInterlude) {
@@ -578,6 +607,12 @@ export function Lyrics(props) {
 			}
 			exitScrollingModeSoon();
 		}
+
+		// Re-enable transitions after scroll settles
+		setTimeout(() => {
+			isScrollingRef.current = false;
+		}, 150);
+
 		return false;
 	};
 
